@@ -324,6 +324,18 @@ func (c *Client) Get(key string) (item *Item, err error) {
 	return
 }
 
+// Stats gets stats for the given key.
+// Key can be empty.
+func (c *Client) Stats(key string) (result map[string]string, err error) {
+	err = c.withKeyAddr(key, func(addr net.Addr) error {
+		return c.statsFromAddr(addr, key, func(it map[string]string) { result = it })
+	})
+	if err == nil && result == nil {
+		err = ErrCacheMiss
+	}
+	return
+}
+
 // Touch updates the expiry for the given key. The seconds parameter is either
 // a Unix timestamp or, if seconds is less than 1 month, the number of seconds
 // into the future at which time the item will expire. ErrCacheMiss is returned if the
@@ -376,6 +388,31 @@ func (c *Client) getFromAddr(addr net.Addr, keys []string, cb func(*Item)) error
 		}
 		if err := parseGetResponse(rw.Reader, cb); err != nil {
 			return err
+		}
+		return nil
+	})
+}
+
+func (c *Client) statsFromAddr(addr net.Addr, key string, cb func(map[string]string)) error {
+	return c.withAddrRw(addr, func(rw *bufio.ReadWriter) error {
+		if key == "" {
+			if _, err := fmt.Fprintf(rw, "stats\r\n"); err != nil {
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintf(rw, "stats %s\r\n", key); err != nil {
+				return err
+			}
+		}
+
+		if err := rw.Flush(); err != nil {
+			return err
+		}
+
+		if result, err := parseStatsResponse(rw.Reader); err != nil {
+			return err
+		} else {
+			cb(result)
 		}
 		return nil
 	})
@@ -497,6 +534,36 @@ func parseGetResponse(r *bufio.Reader, cb func(*Item)) error {
 		it.Value = it.Value[:size]
 		cb(it)
 	}
+}
+
+// parseStatsResponse reads a Stats response from r and calls cb for each
+// read and allocated Item
+func parseStatsResponse(r *bufio.Reader) (map[string]string, error) {
+	var result = make(map[string]string)
+	for {
+		line, err := r.ReadSlice('\n')
+		if err != nil {
+			return result, err
+		}
+		if bytes.Equal(line, resultEnd) {
+			return result, nil
+		}
+		if bytes.Contains(line, []byte("ERROR")) {
+			return nil, errors.New(string(line))
+		}
+
+		l := strings.TrimSpace(string(line))
+		if !strings.HasPrefix(l, "STAT") {
+			continue
+		}
+		items := strings.SplitN(l, " ", 3)
+		if len(items) != 3 {
+			continue
+		}
+		result[items[1]] = items[2]
+	}
+
+	return result, nil
 }
 
 // scanGetResponseLine populates it and returns the declared size of the item.
